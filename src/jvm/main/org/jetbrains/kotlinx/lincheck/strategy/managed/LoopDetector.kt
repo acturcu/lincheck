@@ -68,8 +68,8 @@ import org.jetbrains.lincheck.datastructures.ManagedCTestConfiguration
  *
  * Note: An example of this behavior is detailed in the comments of the code itself.
  */
-internal class LoopDetector(
-    private val hangingDetectionThreshold: Int
+internal open class LoopDetector(
+    val hangingDetectionThreshold: Int
 ) {
     /**
      * Current mode.
@@ -139,13 +139,13 @@ internal class LoopDetector(
     /**
      * In replay mode, represents the period of spin-cycle if spin-cycle was entered.
      */
-    private val replayModeCurrentCyclePeriod: Int
+    val replayModeCurrentCyclePeriod: Int
         get() = replayModeLoopDetectorHelper?.currentCyclePeriod ?: 0
 
     /**
      * Is called before each interleaving processing
      */
-    fun reset() {
+    open fun reset() {
         currentThreadId = -1
         totalExecutionsCount = 0
         currentHangingDetectionThreshold = hangingDetectionThreshold
@@ -247,7 +247,7 @@ internal class LoopDetector(
      *
      * @see LoopDetector.Decision
      */
-    fun visitCodeLocation(iThread: Int, codeLocation: Int): Decision {
+    open fun visitCodeLocation(iThread: Int, codeLocation: Int): Decision {
         check(currentThreadId == iThread) {
             "The current thread id $currentThreadId is not equal to the one provided $iThread."
         }

@@ -90,7 +90,7 @@ internal abstract class ManagedStrategy(
     protected val currentActorId = mutableThreadMapOf<Int>()
 
     // Detector of loops or hangs (i.e. active locks).
-    internal val loopDetector: LoopDetector = LoopDetector(settings.hangingDetectionThreshold)
+    internal val loopDetector: LoopDetector2 = LoopDetector2(settings.hangingDetectionThreshold)
 
     // Tracker of objects' allocations and object graph topology.
     protected abstract val objectTracker: ObjectTracker
@@ -137,7 +137,7 @@ internal abstract class ManagedStrategy(
     // Stores the global number of stack trace elements.
     private var callStackTraceElementId = 0
 
-    // Stores the currently executing methods call stack for each thread.
+    // Stores the currently executing methods call stack for each thread. TODO:; important- each method call is added here
     private val callStackTrace = mutableThreadMapOf<MutableList<CallStackTraceElement>>()
 
     // In case of suspension, the call stack of the corresponding `suspend`
@@ -1627,7 +1627,7 @@ internal abstract class ManagedStrategy(
             // add trace point to the trace
             traceCollector?.addTracePointInternal(tracePoint)
             // notify loop detector
-            loopDetector.beforeAtomicMethodCall(codeLocation, params)
+            loopDetector.beforeAtomicMethodCall(codeLocation, params) //on method calls still need to interact TODO + thread scheduling
         } else {
             // handle non-atomic methods
 
@@ -1841,12 +1841,22 @@ internal abstract class ManagedStrategy(
         }
     }
 
-    override fun onLoopIteration(codeLocation: Int, loopId: Int) {
-        error("Lincheck managed strategy does not support CFG-based loops tracking.")
+    // ---- ON LOOP EVENTS ----
+    override fun onLoopIteration(codeLocation: Int, loopId: Int) = runInsideIgnoredSection {
+//        error("Lincheck managed strategy does not support CFG-based loops tracking."
+        val threadId = threadScheduler.getCurrentThreadId()
+
+        val decision = loopDetector.onLoopIteration(threadId, codeLocation, loopId)
+
+        if (decision != LoopDetector.Decision.Idle) {
+            processLoopDetectorDecision(threadId, codeLocation, decision)
+            return
+        }
     }
 
     override fun afterLoopExit(codeLocation: Int, loopId: Int, exception: Throwable?, canEnterFromOutsideLoop: Boolean) {
-        error("Lincheck managed strategy does not support CFG-based loops tracking.")
+        val threadId = threadScheduler.getCurrentThreadId()
+        loopDetector.afterLoopExit(threadId, codeLocation, loopId, exception, canEnterFromOutsideLoop)
     }
 
     private fun <T> KResult<T>.toBootstrapResult() =

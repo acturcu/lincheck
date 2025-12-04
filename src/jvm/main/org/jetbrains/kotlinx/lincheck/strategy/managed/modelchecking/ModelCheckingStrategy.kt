@@ -354,7 +354,9 @@ internal class ModelCheckingStrategy(
         }
 
         fun chooseThread(iThread: Int): Int {
-            val availableThreads = availableThreads(iThread)
+            // TODO: not really needed to do this prioritization
+//            val availableThreads = availableThreads(iThread)
+            val availableThreads = prioritizeThreadByLoopState(availableThreads(iThread))
             val nextThread = if (currentInterleavingPosition < threadSwitchChoices.size) {
                 // Use the predefined choice.
                 val nextThread = threadSwitchChoices[currentInterleavingPosition++]
@@ -404,7 +406,12 @@ internal class ModelCheckingStrategy(
             executionPosition++
             if (shouldAddNewSwitchPoints && executionPosition > (switchPositions.lastOrNull() ?: -1)) {
                 // Add a new thread choosing node corresponding to the switch at the current execution position.
-                val choice = Choice(ThreadChoosingNode(availableThreads(iThread)), executionPosition)
+                // Modified to consider loop detector state when prioritizing threads. (same existing interleavings, but different ordering)
+                // TODO: not really needed, might remove later
+                val available = availableThreads(iThread)
+                val priorityThreads = prioritizeThreadByLoopState(available)
+
+                val choice = Choice(ThreadChoosingNode(priorityThreads), executionPosition)
                 currentInterleavingNode.addChoice(choice)
             }
         }
@@ -428,6 +435,29 @@ internal class ModelCheckingStrategy(
         }
 
         fun build() = Interleaving(switchPositions, threadSwitchChoices)
+    }
+
+
+//    Main idea is the following:
+//    - non-looping threads are tried first,
+//    - then threads currently in loops but not yet suspected,
+//    - lastly, threads in loops marked suspected.
+    private fun prioritizeThreadByLoopState(threads: List<Int>) : List<Int> {
+        val summaries = loopDetector.currentLoopStatesSummary()
+        if (summaries.isEmpty()) return threads
+
+        val byThread = summaries.associateBy { it.threadId }
+
+        fun rankCandidates (threadId: Int): Int {
+            val summary = byThread[threadId] ?: return 0
+            return when {
+                summary.isSuspect -> 2 // suspect and looping
+                summary.isInsideLoop -> 1 // looping, not suspect yet
+                else -> 0 // not in loop
+            }
+        }
+
+        return threads.sortedWith(compareBy({ rankCandidates(it) }, { it }))
     }
 }
 
