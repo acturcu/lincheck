@@ -47,7 +47,11 @@ class BoundedLoopDetector(
         val frame = state.callStack.lastOrNull() ?: return LoopDetector.Decision.IDLE
 
         val loop = frame.loops.lastOrNull { it.key.loopId == loopId && it.key.codeLocation == codeLocation }
-            ?: ActiveLoopInfo(LoopKey(loopId, codeLocation)).also { frame.loops.addLast(it) }
+            ?: ActiveLoopInfo(LoopKey(loopId, codeLocation)).also {
+                frame.loops.addLast(it)
+                LoopEvalHooks.onLoopEntered()
+            }
+        LoopEvalHooks.onIrreducibleLoopIteration()
 
         return computeLoopDecision(loop)
     }
@@ -58,12 +62,17 @@ class BoundedLoopDetector(
 
     private fun computeLoopDecision(loop: ActiveLoopInfo): LoopDetector.Decision {
         loop.iterationCount += 1
+        LoopEvalHooks.onLoopIteration(loop.iterationCount)
 
-        if (loop.iterationCount % iterationsBeforeThreadSwitch == 0)
+        if (loop.iterationCount % iterationsBeforeThreadSwitch == 0) {
+            LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.BOUNDED_PERIODIC_SWITCH)
             return LoopDetector.Decision.SWITCH_THREAD
+        }
 
-        if (loop.iterationCount >= iterationsBound)
+        if (loop.iterationCount >= iterationsBound) {
+            LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.BOUNDED_LOOP_BOUND)
             return LoopDetector.Decision.STUCK
+        }
 
         return LoopDetector.Decision.IDLE
     }

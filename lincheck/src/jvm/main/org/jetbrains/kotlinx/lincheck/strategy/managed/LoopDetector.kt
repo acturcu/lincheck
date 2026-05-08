@@ -203,6 +203,9 @@ internal class LoopInstanceState(
 
     // Iteration number at which a loop instance last requested a thread switch.
     var lastSwitchIterNumber: Int = 0
+
+    // Set when UNKNOWN has reached decision logic, to count it only once per loop instance.
+    var unknownDecisionCounted: Boolean = false
 }
 
 abstract class AbstractLoopDetector : LoopDetector {
@@ -299,6 +302,7 @@ abstract class AbstractLoopDetector : LoopDetector {
         }
         if (existing == null) {
             frame.loops.addLast(ActiveLoopInfo(LoopKey(loopId, codeLocation)))
+            LoopEvalHooks.onLoopEntered()
         }
     }
 
@@ -315,6 +319,7 @@ abstract class AbstractLoopDetector : LoopDetector {
             match?.let { (frame, loop) ->
                 loop.iterationCount = 0
                 frame.loops.remove(loop)
+                LoopEvalHooks.onLoopExited()
             }
             return enterCodeLocation
         }
@@ -344,13 +349,18 @@ abstract class AbstractLoopDetector : LoopDetector {
         val counters = state.methodCallCounters
         val methodCallCounter = (counters[methodId] ?: 0) + 1
         counters[methodId] = methodCallCounter
+        LoopEvalHooks.onMethodEntered(methodCallCounter)
         if (methodCallCounter > recursiveCallsBound) {
+            LoopEvalHooks.onRecursionBoundHit()
+            LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.RECURSION_BOUND)
             return LoopDetector.Decision.STUCK
         }
 
         if (top != null && top.methodId == methodId) {
             top.depth += 1
             if (top.depth > recursiveCallsBound) {
+                LoopEvalHooks.onRecursionBoundHit()
+                LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.RECURSION_BOUND)
                 return LoopDetector.Decision.STUCK
             }
         } else {
@@ -371,6 +381,7 @@ abstract class AbstractLoopDetector : LoopDetector {
         val state = state(threadId)
         val stack = state.callStack
         val top = stack.lastOrNull() ?: return
+        LoopEvalHooks.onMethodExited()
 
         val counters = state.methodCallCounters
         val methodCallCounter = (counters[methodId] ?: 1) - 1

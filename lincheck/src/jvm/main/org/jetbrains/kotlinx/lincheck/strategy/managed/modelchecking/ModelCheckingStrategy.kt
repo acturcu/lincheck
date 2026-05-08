@@ -12,6 +12,7 @@ package org.jetbrains.kotlinx.lincheck.strategy.managed.modelchecking
 import org.jetbrains.kotlinx.lincheck.runner.Runner
 import org.jetbrains.kotlinx.lincheck.strategy.managed.*
 import org.jetbrains.kotlinx.lincheck.runner.ExecutionPart.*
+import org.jetbrains.kotlinx.lincheck.runner.InvocationResult
 import org.jetbrains.kotlinx.lincheck.util.ThreadId
 import org.jetbrains.lincheck.trace.TraceContext
 import org.jetbrains.lincheck.util.Logger
@@ -472,6 +473,14 @@ internal class ModelCheckingStrategy(
         }
 
         fun build() = Interleaving(switchPositions, threadSwitchChoices)
+    }
+
+    override fun runInvocation(): InvocationResult {
+        val result = super.runInvocation()
+        if (!collectTrace && !isReplayingSpinCycle) {
+            LoopEvalHooks.onExploredSchedule()
+        }
+        return result
     }
 }
 

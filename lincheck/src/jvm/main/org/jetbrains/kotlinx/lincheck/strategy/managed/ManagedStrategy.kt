@@ -326,9 +326,12 @@ internal abstract class ManagedStrategy(
         if (!canCollectTrace) {
             // Interleaving events can be collected almost always,
             // except for the strange cases such as runner's timeout or exceptions in Lincheck.
+            LoopEvalHooks.onFailure(classifyFailure(result))
             return null to result
         }
 
+        LoopEvalHooks.onFailure(classifyFailure(result))
+        LoopEvalHooks.onTraceCollectionStarted()
         collectTrace = true
 
         initializeReplay()
@@ -386,6 +389,15 @@ internal abstract class ManagedStrategy(
         if (settings.checkObstructionFreedom && !currentActorIsBlocking && !concurrentActorCausesBlocking) {
             failDueToObstructionFreedomViolation(lazyMessage)
         }
+    }
+
+    private fun classifyFailure(result: InvocationResult): LoopEvalFailureKind = when (result) {
+        is CompletedInvocationResult -> LoopEvalFailureKind.INCORRECT_RESULTS
+        is ManagedLivelockInvocationResult -> LoopEvalFailureKind.LIVELOCK
+        is ManagedDeadlockInvocationResult -> LoopEvalFailureKind.DEADLOCK
+        is ObstructionFreedomViolationInvocationResult -> LoopEvalFailureKind.OBSTRUCTION_FREEDOM
+        is RunnerTimeoutInvocationResult -> LoopEvalFailureKind.RUNNER_TIMEOUT
+        else -> LoopEvalFailureKind.INTERNAL_ERROR
     }
 
     private val currentActorIsBlocking: Boolean get() {
@@ -626,7 +638,6 @@ internal abstract class ManagedStrategy(
         registerThread(startingThread, startingThreadDescriptor)
     }
 
-
     override fun beforeThreadRun(
         threadDescriptor: ThreadDescriptor
     ) = threadDescriptor.runInsideIgnoredSection {
@@ -640,13 +651,14 @@ internal abstract class ManagedStrategy(
 
         val methodId = context.getThreadRunMethodId()
         if (currentExecutionPart !== VALIDATION && !threadScheduler.isAborted(currentThreadId)) {
-            loopDetector.onMethodEnter(
+            val loopDecision = loopDetector.onMethodEnter(
                 threadId = currentThreadId,
                 codeLocation = UNKNOWN_CODE_LOCATION,
                 methodId = methodId,
                 receiver = testInstance,
                 params = emptyArray(),
             )
+            processMethodEnterDecision(loopDecision)
         }
 
         val tracePoint = addBeforeMethodCallTracePoint(
@@ -956,13 +968,14 @@ internal abstract class ManagedStrategy(
         traceCollector?.addTracePointInternal(tracePoint)
 
         if (currentExecutionPart !== VALIDATION && !threadScheduler.isAborted(iThread)) {
-            loopDetector.onMethodEnter(
+            val loopDecision = loopDetector.onMethodEnter(
                 threadId = iThread,
                 codeLocation = UNKNOWN_CODE_LOCATION,
                 methodId = methodId,
                 receiver = runner.testInstance,
                 params = actor.arguments.toTypedArray(),
             )
+            processMethodEnterDecision(loopDecision)
         }
 
         enableAnalysis()
@@ -1886,7 +1899,7 @@ internal abstract class ManagedStrategy(
                 params = params,
             )
             if (loopDecision == LoopDetector.Decision.STUCK) {
-                failDueToLivelock()
+                processMethodEnterDecision(loopDecision)
             }
         }
 
@@ -2045,13 +2058,14 @@ internal abstract class ManagedStrategy(
         val threadId = threadScheduler.getCurrentThreadId()
         val methodDescriptor = context.methodPool[methodId]
         if (currentExecutionPart !== VALIDATION && !threadScheduler.isAborted(threadId)) {
-            loopDetector.onMethodEnter(
+            val loopDecision = loopDetector.onMethodEnter(
                 threadId = threadId,
                 codeLocation = codeLocation,
                 methodId = methodId,
                 receiver = owner,
                 params = emptyArray(),
             )
+            processMethodEnterDecision(loopDecision)
         }
 
         if (threadScheduler.isAborted(threadId)) {
@@ -2150,12 +2164,15 @@ internal abstract class ManagedStrategy(
         if (currentExecutionPart !== VALIDATION && !threadScheduler.isAborted(threadId)) {
             val decision = loopDetector.onIrreducibleLoopIteration(threadId, codeLocation, loopId)
             // we skip trace collection here since we don't have stable boundaries
+            recordLoopDecision(decision)
             when (decision) {
                 LoopDetector.Decision.IDLE -> {}
                 LoopDetector.Decision.SWITCH_THREAD -> {
+                    val enabledThreads = availableThreads(threadId).toSet()
                     tryAbortingUserThreads(threadId, BlockingReason.LiveLocked)
                     onSwitchPoint(threadId)
-                    switchCurrentThread(threadId, BlockingReason.LiveLocked)
+                    val switched = switchCurrentThread(threadId, BlockingReason.LiveLocked)
+                    LoopEvalHooks.onSwitchAttempt(enabledThreads.size, switched)
                 }
                 LoopDetector.Decision.STUCK -> {
                     failDueToLivelock()
@@ -2245,20 +2262,35 @@ internal abstract class ManagedStrategy(
         }
     }
 
+    private fun processMethodEnterDecision(decision: LoopDetector.Decision) {
+        if (decision == LoopDetector.Decision.STUCK) {
+            recordLoopDecision(decision)
+            failDueToLivelock()
+        }
+    }
+
     private fun processLoopDetectorDecision(
         decision: LoopDetector.Decision,
         threadId: ThreadId,
         loopId: Int,
         codeLocation: Int
     ) {
+        recordLoopDecision(decision)
         when (decision) {
             LoopDetector.Decision.IDLE -> {}
             LoopDetector.Decision.SWITCH_THREAD -> {
                 val enabledThreads = availableThreads(threadId).toSet()
                 tryAbortingUserThreads(threadId, BlockingReason.LiveLocked)
                 onSwitchPoint(threadId)
-                switchCurrentThread(threadId, BlockingReason.LiveLocked)
-                loopDetector.onSwitchedFromLoop(threadId, loopId, codeLocation, enabledThreads)
+                val switched = switchCurrentThread(threadId, BlockingReason.LiveLocked)
+                LoopEvalHooks.onSwitchAttempt(enabledThreads.size, switched)
+                if (switched) {
+                    loopDetector.onSwitchedFromLoop(threadId, loopId, codeLocation, enabledThreads)
+                } else {
+                    LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.NO_SWITCHABLE_THREAD)
+                    recordLoopDecision(LoopDetector.Decision.STUCK)
+                    failDueToLivelock()
+                }
             }
 
             LoopDetector.Decision.STUCK -> {
@@ -2278,6 +2310,10 @@ internal abstract class ManagedStrategy(
                 failDueToLivelock()
             }
         }
+    }
+
+    private fun recordLoopDecision(decision: LoopDetector.Decision) {
+        LoopEvalHooks.onDecision(decision)
     }
 
     override fun onThrow(threadDescriptor: ThreadDescriptor, codeLocation: Int, exception: Throwable) {

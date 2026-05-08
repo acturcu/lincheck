@@ -1,3 +1,7 @@
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+import org.gradle.jvm.toolchain.JavaToolchainService
+import org.gradle.kotlin.dsl.getByType
+
 sourceSets {
     main {
         java.srcDirs("src/main")
@@ -32,5 +36,31 @@ tasks {
         enableAssertions = true
         testLogging.showStandardStreams = true
         outputs.upToDateWhen { false } // Always run tests when called
+    }
+
+    register<JavaExec>("loopEval") {
+        group = "verification"
+        description = "Runs the loop-evaluation benchmarks via AllBenchmarksRunner"
+        classpath = sourceSets["main"].runtimeClasspath
+        mainClass.set("org.jetbrains.lincheck_test.evaluation.common.AllBenchmarksRunner")
+        workingDir = rootProject.projectDir
+
+        val jdkToolchainVersion: String by project
+        val javaToolchains = project.extensions.getByType<JavaToolchainService>()
+        javaLauncher.set(
+            javaToolchains.launcherFor {
+                languageVersion.set(JavaLanguageVersion.of(jdkToolchainVersion))
+            }
+        )
+
+        listOf(
+            "lincheck.loopEval.suite",
+            "lincheck.loopEval.benchmarks"
+        ).forEach { propertyName ->
+            val value = System.getProperty(propertyName) ?: project.findProperty(propertyName)?.toString()
+            if (value != null) {
+                systemProperty(propertyName, value)
+            }
+        }
     }
 }

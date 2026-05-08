@@ -125,6 +125,7 @@ class AdaptiveLoopDetector(
     ): Pair<Boolean, LoopDetector.Decision> {
         val (loop, started) = startLoopIfNeeded(threadId, codeLocation, loopId)
         loop.iterationCount += 1
+        LoopEvalHooks.onLoopIteration(loop.iterationCount)
 
         val inst = getOrCreateInstance(threadId, loopId, codeLocation)
         val decision =
@@ -148,10 +149,12 @@ class AdaptiveLoopDetector(
         // classify the loop as await and process the completed iteration at the back-edge
         val inst = getOrCreateInstance(threadId, loopId, codeLocation)
         inst.consecutiveAwaitBackEdgeHits ++
+        LoopEvalHooks.onAwaitBackEdgeHit()
 
         if (inst.kind == LoopKind.UNKNOWN && inst.iterNumber >= 3 && inst.consecutiveAwaitBackEdgeHits > awaitClassificationThreshold) {
             inst.kind = LoopKind.RELAXED_AWAIT
             inst.requiresExternalProgress = true
+            LoopEvalHooks.onAwaitClassified()
         }
 //        println("Classified loop ${inst.ownerThreadId}:${inst.signatureHistory.joinToString(",")} as ${inst.kind}")
         inst.waitSetCandidates.addAll(inst.obs.reads.keys)
@@ -210,17 +213,24 @@ class AdaptiveLoopDetector(
 
                 inst.repeatCount = if (signature == inst.lastSignature) inst.repeatCount + 1 else 0
                 inst.lastSignature = signature
+                if (inst.repeatCount > 0) {
+                    LoopEvalHooks.onRepeatSignature()
+                }
+                val hasSignatureCycle = hasCycle(inst.signatureHistory)
+                if (hasSignatureCycle) {
+                    LoopEvalHooks.onSignatureCycle()
+                }
 
                 // Track write only signature for ZNE detection. we count consecutive iterations where same locations are written with same values
                 if (inst.obs.writes.isNotEmpty()) {
                     val writeSignature = inst.obs.writeSignature()
                     inst.staleWriteCount = if (writeSignature == inst.lastWriteSignature) inst.staleWriteCount + 1 else 0
                     inst.lastWriteSignature = writeSignature
-                }  else {
+                } else {
                     inst.staleWriteCount = 0
                 }
 
-                if (inst.repeatCount > 0 || hasCycle(inst.signatureHistory)) {
+                if (inst.repeatCount > 0 || hasSignatureCycle) {
                     inst.waitSetCandidates.addAll(inst.obs.reads.keys)
                 }
 
@@ -229,10 +239,16 @@ class AdaptiveLoopDetector(
                 // Start making decisions after we pass the minimum iteration threshold
                 // in order to avoid premature switching for short loops.
                 if (inst.iterNumber >= minIterationsBeforeSwitch) {
+                    if (inst.kind == LoopKind.UNKNOWN && !inst.unknownDecisionCounted) {
+                        inst.unknownDecisionCounted = true
+                        LoopEvalHooks.onUnknownDecision()
+                    }
                     val wsHash = computeWaitSetHash(inst)
                     inst.abstractStateHash = wsHash
                     val visits = (inst.abstractStateVisits[wsHash] ?: 0) + 1
                     inst.abstractStateVisits[wsHash] = visits
+                    LoopEvalHooks.onWaitSetSize(inst.waitSetCandidates.size)
+                    LoopEvalHooks.onAbstractStateVisit(visits)
 
                     val hasRelevantWrite = checkForRelevantWrite(inst)
 //                    println("hasRelevantWrite=$hasRelevantWrite for thread ${inst.ownerThreadId} at iteration ${inst.iterNumber} with waitSetCandidates ${inst.waitSetCandidates}")
@@ -252,6 +268,10 @@ class AdaptiveLoopDetector(
                 // If there are no observations, there is no basis for signature decisions,
                 // we just switch after each [minIterationsBeforeSwitch] number of iterations to prevent infinite spinning
                 if (inst.iterNumber >= minIterationsBeforeSwitch && inst.iterNumber % minIterationsBeforeSwitch == 0) {
+                    if (inst.kind == LoopKind.UNKNOWN && !inst.unknownDecisionCounted) {
+                        inst.unknownDecisionCounted = true
+                        LoopEvalHooks.onUnknownDecision()
+                    }
                     return finishAndClearIteration(inst, switchThread(inst))
                 }
             }
@@ -268,6 +288,7 @@ class AdaptiveLoopDetector(
             inst.lastSeenWSValues[loc] = valHash
         }
         inst.obs.clear()
+        LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.ADAPTIVE_NO_OBSERVATIONS)
         return decision
     }
 
@@ -276,8 +297,14 @@ class AdaptiveLoopDetector(
         if (inst.kind != LoopKind.UNKNOWN || inst.iterNumber < 3) return
 
         when {
-            inst.totalCasFailures >= 2 && inst.repeatCount > 0 -> inst.kind = LoopKind.CAS
-            inst.staleWriteCount >= 2 -> inst.kind = LoopKind.ZNE
+            inst.totalCasFailures >= 2 && (inst.repeatCount > 0) -> {
+                inst.kind = LoopKind.CAS
+                LoopEvalHooks.onCasClassified()
+            }
+            inst.staleWriteCount >= 2 -> {
+                inst.kind = LoopKind.ZNE
+                LoopEvalHooks.onZneClassified()
+            }
         }
 
 //        println("Classified loop ${inst.ownerThreadId}:${inst.signatureHistory.joinToString(",")} as ${inst.kind}")
@@ -306,6 +333,7 @@ class AdaptiveLoopDetector(
         inst.abstractStateVisits.clear()
         inst.maxEnabledPerAbstractState.clear()
         inst.thresholdSwitchAttempted = false
+        LoopEvalHooks.onRelevantExternalWrite()
     }
 
     private fun makeUpperThresholdDecision(
@@ -372,7 +400,7 @@ class AdaptiveLoopDetector(
         if (upperThresholdDecision != null) {
             return upperThresholdDecision
         }
-        
+
         // Check if we should declare stuck: the same abstract state was revisited many times
         // with no external progress, no other thread is availbe to be scheduled
         // and the local execution cannot change the condition of the loop.
@@ -382,6 +410,7 @@ class AdaptiveLoopDetector(
         ) {
             val absHash = inst.abstractStateHash
             if (inst.maxEnabledPerAbstractState[absHash] == 0) {
+                LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.ADAPTIVE_ABSTRACT_STATE)
                 return LoopDetector.Decision.STUCK
             }
         }
@@ -389,25 +418,37 @@ class AdaptiveLoopDetector(
         // Otherwise check the thresholds for each loop kind for switching threads
         when (inst.kind) {
             LoopKind.RELAXED_AWAIT -> {
-                if (inst.repeatCount >= awaitSwitchThreshold && canSwitchThread(inst))
+                if (inst.repeatCount >= awaitSwitchThreshold && canSwitchThread(inst)) {
+                    LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.ADAPTIVE_AWAIT)
                     return switchThread(inst)
+                }
             }
             LoopKind.CAS -> {
                 if (inst.repeatCount >= casSwitchThreshold &&
                     inst.totalCasFailures > casSwitchThreshold &&
                     canSwitchThread(inst)
-                )
+                ) {
+                    LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.ADAPTIVE_CAS)
+
                     return switchThread(inst)
+
+                }
             }
             LoopKind.ZNE -> {
-                if (inst.staleWriteCount >= zneSwitchThreshold && canSwitchThread(inst))
+                if (inst.staleWriteCount >= zneSwitchThreshold && canSwitchThread(inst)) {
+                    LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.ADAPTIVE_ZNE)
                     return switchThread(inst)
+
+                }
             }
             LoopKind.UNKNOWN -> {
                 if ((hasCycle(inst.signatureHistory) || inst.repeatCount >= defaultSwitchThreshold) &&
                     canSwitchThread(inst)
-                )
+                ) {
+                    LoopEvalHooks.onDecisionReason(LoopEvalDecisionReason.ADAPTIVE_UNKNOWN)
                     return switchThread(inst)
+
+                }
             }
         }
 
@@ -447,6 +488,9 @@ class AdaptiveLoopDetector(
         loop.iterationCount = (loop.iterationCount ?: 0) + 1
 
         val inst = getOrCreateInstance(threadId, loopId, codeLocation)
+        LoopEvalHooks.onIrreducibleLoopIteration()
+        LoopEvalHooks.onLoopIteration(loop?.iterationCount ?: (inst.iterNumber + 1))
+
         return processIteration(inst)
     }
 
@@ -454,11 +498,13 @@ class AdaptiveLoopDetector(
     override fun onSharedRead(threadId: Int, codeLocation: Int, locationKey: Int, valueHash: Int) {
         val inst = currentInstance(threadId) ?: return
         inst.obs.reads[locationKey] = valueHash
+        LoopEvalHooks.onSharedReadInLoop()
     }
 
     override fun onSharedWrite(threadId: Int, codeLocation: Int, locationKey: Int, valueHash: Int) {
         val inst = currentInstance(threadId)
         inst?.obs?.writes?.set(locationKey, valueHash)
+        LoopEvalHooks.onSharedWriteInLoop()
 
         globalWriteVersion++
         locationWriteVersions[locationKey] = globalWriteVersion
@@ -475,6 +521,7 @@ class AdaptiveLoopDetector(
         } else {
             inst.obs.casFailures++
         }
+        LoopEvalHooks.onCasResultInLoop(success)
     }
 
     override fun onSwitchedFromLoop(
