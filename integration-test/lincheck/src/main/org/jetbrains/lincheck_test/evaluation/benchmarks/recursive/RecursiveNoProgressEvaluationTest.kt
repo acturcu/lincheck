@@ -1,4 +1,4 @@
-package org.jetbrains.lincheck_test.evaluation.micro
+package org.jetbrains.lincheck_test.evaluation.benchmarks.recursive
 
 import org.jetbrains.lincheck.datastructures.Operation
 import org.jetbrains.lincheck_test.evaluation.common.BenchmarkCase

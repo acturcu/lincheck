@@ -1,4 +1,4 @@
-package org.jetbrains.lincheck_test.evaluation.variable
+package org.jetbrains.lincheck_test.evaluation.benchmarks
 
 import org.jetbrains.lincheck.datastructures.ModelCheckingOptions
 import org.jetbrains.lincheck_test.evaluation.common.EvalOptions
