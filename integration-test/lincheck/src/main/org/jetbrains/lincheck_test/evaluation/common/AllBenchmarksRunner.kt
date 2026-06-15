@@ -38,7 +38,8 @@ object AllBenchmarksRunner {
             repetitions = repetitions
         )
 
-        val outputName = "results_${modeLabel.lowercase()}_${suite.name.lowercase()}_0806.csv"
+        val date = java.time.LocalDateTime.now().toString().replace(":", "-")
+        val outputName = "results_${modeLabel.lowercase()}_${suite.name.lowercase()}_${date}.csv"
         val output = File("build/loop-eval/raw/$outputName")
         output.parentFile.mkdirs()
 
