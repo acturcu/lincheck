@@ -10,8 +10,10 @@
 
 package org.jetbrains.lincheck_test.evaluation.common
 
+import java.io.File
 
 data class EvalConfig(
     val modeLabel: String,   // BASELINE / BOUNDED / ADAPTIVE
-    val repetitions: Int = 10
+    val repetitions: Int = 10,
+    val traceOutputDir: File,
 )

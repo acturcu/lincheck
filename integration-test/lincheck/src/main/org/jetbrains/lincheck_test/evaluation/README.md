@@ -57,4 +57,4 @@ For example:
 build/loop-eval/raw/results_adaptive_all_2026-06-15T11-03-03.883356900.csv
 ```
 
-Running the same mode and suite again overwrites the existing CSV file.
+To run the validation as described in the thesis paper, modify in `ManagedStrategyCongiguration.kt` the values of `DEFAULT_LOOP_ITERATIONS_BEFORE_THREAD_SWITCH`, `DEFAULT_LOOP_BOUND` and `DEFAULT_RECURSION_BOUND` to values 10 times bigger.

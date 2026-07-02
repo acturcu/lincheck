@@ -10,6 +10,7 @@
 
 package org.jetbrains.lincheck_test.evaluation.common
 
+import org.jetbrains.lincheck.LincheckAssertionError
 import org.jetbrains.kotlinx.lincheck.strategy.managed.LoopEvalHooks
 import org.jetbrains.kotlinx.lincheck.strategy.managed.LoopEvalFailureKind
 import java.io.File
@@ -33,18 +34,23 @@ object AllBenchmarksRunner {
         LoopEvalHooks.install(EvalStatsHolder)
 
         println("Running benchmarks with config: modeLabel=$modeLabel, repetitions=$repetitions, suite=${suite.name}")
+        val date = java.time.LocalDateTime.now().toString().replace(":", "-")
+        val runLabel = "${modeLabel.lowercase()}_${suite.name.lowercase()}_$date"
+        val traceOutputDir = File("build/loop-eval/traces/$runLabel")
         val config = EvalConfig(
             modeLabel = modeLabel,
-            repetitions = repetitions
+            repetitions = repetitions,
+            traceOutputDir = traceOutputDir,
         )
 
-        val date = java.time.LocalDateTime.now().toString().replace(":", "-")
         val outputName = "results_${modeLabel.lowercase()}_${suite.name.lowercase()}_${date}.csv"
         val output = File("build/loop-eval/raw/$outputName")
         output.parentFile.mkdirs()
+        traceOutputDir.mkdirs()
 
         val logger = EvalLogger(output)
         println("Logging results to ${output.absolutePath}")
+        println("Saving failure traces to ${traceOutputDir.absolutePath}")
         val benchmarks = BenchmarkRegistry.selectBenchmarks(suite)
             .filter { benchmarkFilter.isEmpty() || it.name in benchmarkFilter }
         check(benchmarks.isNotEmpty()) {
@@ -78,11 +84,17 @@ object AllBenchmarksRunner {
         val startTime = System.nanoTime()
         try {
             benchmark.runModelChecking()
+        } catch (e: LincheckAssertionError) {
+            status = "FAIL"
+            errorType = e::class.java.simpleName
+            errorMessage = e.message ?: ""
+            saveFailureTrace(benchmark, config, repetition, e)
         } catch (t: Throwable) {
             status = "FAIL"
             errorType = t::class.java.simpleName
             errorMessage = t.message ?: ""
             EvalStatsHolder.onFailure(LoopEvalFailureKind.EXCEPTION)
+            saveFailureTrace(benchmark, config, repetition, t)
         }
         val runtime = (System.nanoTime() - startTime) / 1_000_000
 
@@ -166,4 +178,24 @@ object AllBenchmarksRunner {
             traceCollectionCount = stats.traceCollectionCount
         )
     }
+
+    private fun saveFailureTrace(
+        benchmark: BenchmarkCase,
+        config: EvalConfig,
+        repetition: Int,
+        failure: Throwable,
+    ) {
+        config.traceOutputDir.mkdirs()
+        val fileName = "${benchmark.name.toFileName()}_rep$repetition.txt"
+        val outputFile = File(config.traceOutputDir, fileName)
+        val text = when (failure) {
+            is LincheckAssertionError -> failure.message ?: failure.toString()
+            else -> failure.stackTraceToString()
+        }
+        outputFile.writeText(text)
+        println("Saved failure trace to ${outputFile.absolutePath}")
+    }
+
+    private fun String.toFileName(): String =
+        replace(Regex("[^A-Za-z0-9._-]"), "_")
 }
